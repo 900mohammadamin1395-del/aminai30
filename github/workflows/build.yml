@@ -88,6 +88,8 @@ jobs:
           import android.view.ViewGroup;
           import android.webkit.CookieManager;
           import android.webkit.GeolocationPermissions;
+          import android.webkit.JsPromptResult;
+          import android.webkit.JsResult;
           import android.webkit.PermissionRequest;
           import android.webkit.ValueCallback;
           import android.webkit.WebChromeClient;
@@ -193,6 +195,41 @@ jobs:
                   });
 
                   web.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public boolean onJsAlert(WebView v, String url, String message, final JsResult result) {
+                          new AlertDialog.Builder(MainActivity.this)
+                                  .setMessage(message)
+                                  .setCancelable(false)
+                                  .setPositiveButton("باشه", (d, w) -> result.confirm())
+                                  .show();
+                          return true;
+                      }
+
+                      @Override
+                      public boolean onJsConfirm(WebView v, String url, String message, final JsResult result) {
+                          new AlertDialog.Builder(MainActivity.this)
+                                  .setMessage(message)
+                                  .setCancelable(false)
+                                  .setPositiveButton("تأیید", (d, w) -> result.confirm())
+                                  .setNegativeButton("لغو", (d, w) -> result.cancel())
+                                  .show();
+                          return true;
+                      }
+
+                      @Override
+                      public boolean onJsPrompt(WebView v, String url, String message, String def, final JsPromptResult result) {
+                          final EditText et = new EditText(MainActivity.this);
+                          et.setText(def == null ? "" : def);
+                          new AlertDialog.Builder(MainActivity.this)
+                                  .setMessage(message)
+                                  .setView(et)
+                                  .setCancelable(false)
+                                  .setPositiveButton("تأیید", (d, w) -> result.confirm(et.getText().toString()))
+                                  .setNegativeButton("لغو", (d, w) -> result.cancel())
+                                  .show();
+                          return true;
+                      }
+
                       @Override
                       public void onProgressChanged(WebView v, int p) {
                           progress.setProgress(p);
