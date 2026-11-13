@@ -1,0 +1,388 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create project files
+        run: |
+          mkdir -p 'app'
+          cat > 'app/build.gradle' <<'AMINEOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.aminai.app'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.aminai.app"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+          }
+          AMINEOF
+          mkdir -p 'app/src/main'
+          cat > 'app/src/main/AndroidManifest.xml' <<'AMINEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="AminAI"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@style/Theme.AminAI">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          AMINEOF
+          mkdir -p 'app/src/main/java/com/aminai/app'
+          cat > 'app/src/main/java/com/aminai/app/MainActivity.java' <<'AMINEOF'
+          package com.aminai.app;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
+          import android.graphics.Bitmap;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.text.InputType;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.webkit.CookieManager;
+          import android.webkit.GeolocationPermissions;
+          import android.webkit.PermissionRequest;
+          import android.webkit.ValueCallback;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceError;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.EditText;
+          import android.widget.FrameLayout;
+          import android.widget.ProgressBar;
+
+          public class MainActivity extends Activity {
+
+              private static final int REQ_FILE = 1001;
+              private static final int REQ_PERM = 1002;
+
+              private WebView web;
+              private ProgressBar progress;
+              private ValueCallback<Uri[]> filePathCallback;
+              private PermissionRequest pendingWebPermission;
+              private SharedPreferences prefs;
+              private boolean errorShown = false;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  prefs = getSharedPreferences("aminai", MODE_PRIVATE);
+
+                  FrameLayout root = new FrameLayout(this);
+                  web = new WebView(this);
+                  root.addView(web, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+                  progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                  progress.setMax(100);
+                  root.addView(progress, new FrameLayout.LayoutParams(
+                          ViewGroup.LayoutParams.MATCH_PARENT, 8));
+                  setContentView(root);
+
+                  setupWebView();
+
+                  if (Build.VERSION.SDK_INT >= 23) {
+                      requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_PERM);
+                  }
+
+                  String url = prefs.getString("server_url", "");
+                  if (url.isEmpty()) {
+                      askServerUrl(false);
+                  } else {
+                      web.loadUrl(url);
+                  }
+              }
+
+              private void setupWebView() {
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setMediaPlaybackRequiresUserGesture(false);
+                  s.setAllowFileAccess(false);
+                  s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+                  s.setGeolocationEnabled(true);
+
+                  CookieManager cm = CookieManager.getInstance();
+                  cm.setAcceptCookie(true);
+                  cm.setAcceptThirdPartyCookies(web, true);
+
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public void onPageStarted(WebView v, String url, Bitmap favicon) {
+                          errorShown = false;
+                          progress.setVisibility(View.VISIBLE);
+                      }
+
+                      @Override
+                      public void onPageFinished(WebView v, String url) {
+                          progress.setVisibility(View.GONE);
+                      }
+
+                      @Override
+                      public void onReceivedError(WebView v, WebResourceRequest req, WebResourceError err) {
+                          if (req.isForMainFrame() && !errorShown) {
+                              errorShown = true;
+                              showConnectionError();
+                          }
+                      }
+
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest req) {
+                          String host = Uri.parse(prefs.getString("server_url", "")).getHost();
+                          Uri u = req.getUrl();
+                          // لینک‌های خارجی (مثل ورود با گوگل) داخل خود برنامه باز می‌شوند؛
+                          // فقط لینک‌های غیر http بیرون داده می‌شوند.
+                          String scheme = u.getScheme();
+                          if (scheme != null && (scheme.equals("http") || scheme.equals("https"))) {
+                              return false;
+                          }
+                          try {
+                              startActivity(new Intent(Intent.ACTION_VIEW, u));
+                          } catch (Exception ignored) { }
+                          return true;
+                      }
+                  });
+
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public void onProgressChanged(WebView v, int p) {
+                          progress.setProgress(p);
+                      }
+
+                      @Override
+                      public void onPermissionRequest(final PermissionRequest request) {
+                          runOnUiThread(new Runnable() {
+                              @Override
+                              public void run() {
+                                  if (Build.VERSION.SDK_INT >= 23
+                                          && checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                                          != PackageManager.PERMISSION_GRANTED) {
+                                      pendingWebPermission = request;
+                                      requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_PERM);
+                                  } else {
+                                      request.grant(request.getResources());
+                                  }
+                              }
+                          });
+                      }
+
+                      @Override
+                      public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback cb) {
+                          cb.invoke(origin, true, false);
+                      }
+
+                      @Override
+                      public boolean onShowFileChooser(WebView v, ValueCallback<Uri[]> cb, FileChooserParams params) {
+                          if (filePathCallback != null) {
+                              filePathCallback.onReceiveValue(null);
+                          }
+                          filePathCallback = cb;
+                          try {
+                              startActivityForResult(params.createIntent(), REQ_FILE);
+                          } catch (Exception e) {
+                              filePathCallback = null;
+                              return false;
+                          }
+                          return true;
+                      }
+                  });
+              }
+
+              private void askServerUrl(final boolean cancellable) {
+                  final EditText input = new EditText(this);
+                  input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+                  input.setHint("http://192.168.1.10:5000");
+                  input.setText(prefs.getString("server_url", ""));
+                  input.setPadding(48, 32, 48, 32);
+
+                  AlertDialog.Builder b = new AlertDialog.Builder(this)
+                          .setTitle("آدرس سرور AminAI")
+                          .setMessage("آدرس سروری که server.py روی آن اجراست را وارد کن.\n"
+                                  + "مثال روی وای‌فای خانه: http://192.168.1.10:5000\n"
+                                  + "یا آدرس هاست: https://example.com")
+                          .setView(input)
+                          .setCancelable(cancellable)
+                          .setPositiveButton("اتصال", (d, w) -> {
+                              String url = input.getText().toString().trim();
+                              if (url.isEmpty()) {
+                                  askServerUrl(cancellable);
+                                  return;
+                              }
+                              if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                                  url = "http://" + url;
+                              }
+                              prefs.edit().putString("server_url", url).apply();
+                              web.loadUrl(url);
+                          });
+                  if (cancellable) {
+                      b.setNegativeButton("لغو", null);
+                  }
+                  b.show();
+              }
+
+              private void showConnectionError() {
+                  new AlertDialog.Builder(this)
+                          .setTitle("اتصال برقرار نشد")
+                          .setMessage("مطمئن شو سرور روشن است و گوشی و کامپیوتر روی یک وای‌فای هستند "
+                                  + "(یا آدرس هاست درست است).")
+                          .setPositiveButton("تلاش دوباره", (d, w) -> {
+                              errorShown = false;
+                              web.reload();
+                          })
+                          .setNeutralButton("تغییر آدرس", (d, w) -> askServerUrl(true))
+                          .setNegativeButton("بستن", null)
+                          .show();
+              }
+
+              @Override
+              protected void onActivityResult(int req, int res, Intent data) {
+                  if (req == REQ_FILE && filePathCallback != null) {
+                      Uri[] result = null;
+                      if (res == RESULT_OK && data != null) {
+                          result = WebChromeClient.FileChooserParams.parseResult(res, data);
+                      }
+                      filePathCallback.onReceiveValue(result);
+                      filePathCallback = null;
+                  }
+                  super.onActivityResult(req, res, data);
+              }
+
+              @Override
+              public void onRequestPermissionsResult(int req, String[] perms, int[] results) {
+                  super.onRequestPermissionsResult(req, perms, results);
+                  if (pendingWebPermission != null) {
+                      boolean ok = results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED;
+                      if (ok) {
+                          pendingWebPermission.grant(pendingWebPermission.getResources());
+                      } else {
+                          pendingWebPermission.deny();
+                      }
+                      pendingWebPermission = null;
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (web.canGoBack()) {
+                      web.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+          }
+          AMINEOF
+          mkdir -p 'app/src/main/res/drawable'
+          cat > 'app/src/main/res/drawable/ic_launcher.xml' <<'AMINEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#1a1040" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#8b5cf6" android:pathData="M54,22 L84,82 L72,82 L66,70 L42,70 L36,82 L24,82 Z M54,40 L47,58 L61,58 Z"/>
+          </vector>
+          AMINEOF
+          mkdir -p 'app/src/main/res/values'
+          cat > 'app/src/main/res/values/styles.xml' <<'AMINEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.AminAI" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">#0b0b1a</item>
+                  <item name="android:statusBarColor">#0b0b1a</item>
+                  <item name="android:navigationBarColor">#0b0b1a</item>
+              </style>
+          </resources>
+          AMINEOF
+          cat > 'build.gradle' <<'AMINEOF'
+          plugins {
+              id 'com.android.application' version '8.1.4' apply false
+          }
+          AMINEOF
+          cat > 'gradle.properties' <<'AMINEOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          AMINEOF
+          mkdir -p 'gradle/wrapper'
+          cat > 'gradle/wrapper/gradle-wrapper.properties' <<'AMINEOF'
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-8.4-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          AMINEOF
+          cat > 'settings.gradle' <<'AMINEOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "AminAI"
+          include ':app'
+          AMINEOF
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.4
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AminAI-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
